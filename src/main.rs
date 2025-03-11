@@ -7,7 +7,9 @@ use std::{env, fs, path::Path, process::Command as ProcessCommand};
 use thiserror::Error;
 
 // Constants for API configuration
-const DEFAULT_GEMINI_API_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent";
+const GEMINI_API_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash-thinking-exp-01-21";
+const GEMINI_MODEL_ENV_VAR: &str = "GEMINI_MODEL";
 const GEMINI_API_ENDPOINT_ENV_VAR: &str = "GEMINI_API_ENDPOINT";
 
 /// Custom error type for the application
@@ -211,7 +213,7 @@ enum GeminiCommand {
 /// Status of a command execution
 /// 
 /// Indicates whether a command succeeded or failed.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 enum CommandStatus {
     Success,
     Failure,
@@ -220,7 +222,7 @@ enum CommandStatus {
 /// Feedback about a command execution
 /// 
 /// Contains details about the execution of a command.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 struct CommandFeedback {
     command_type: String,
     command_details: String,
@@ -228,14 +230,27 @@ struct CommandFeedback {
     message: String,
 }
 
-/// Gets the Gemini API endpoint from environment variable or uses the default
+/// Gets the Gemini model name from environment variable or uses the default
+///
+/// # Returns
+///
+/// * `String` - The Gemini model name
+fn get_gemini_model() -> String {
+    env::var(GEMINI_MODEL_ENV_VAR)
+        .unwrap_or_else(|_| DEFAULT_GEMINI_MODEL.to_string())
+}
+
+/// Gets the Gemini API endpoint from environment variable or constructs it from the model name
 ///
 /// # Returns
 ///
 /// * `String` - The Gemini API endpoint URL
 fn get_gemini_api_endpoint() -> String {
     env::var(GEMINI_API_ENDPOINT_ENV_VAR)
-        .unwrap_or_else(|_| DEFAULT_GEMINI_API_ENDPOINT.to_string())
+        .unwrap_or_else(|_| {
+            let model = get_gemini_model();
+            format!("{}/{model}:generateContent", GEMINI_API_BASE_URL)
+        })
 }
 
 /// Communicates with the Gemini API in chat mode
@@ -1124,7 +1139,7 @@ async fn main() -> Result<(), AppError> {
 
     let system_info = get_system_info();
     let mut feedback_messages = Vec::new();
-    let feedback_string = String::new();
+    let mut feedback_string = String::new();
 
     match &cli.command {
         Commands::Chat { query } => {
@@ -1238,6 +1253,18 @@ async fn main() -> Result<(), AppError> {
                     }
                 };
                 feedback_messages.push(feedback);
+            }
+            if !feedback_messages.is_empty() {
+                match format_feedback(feedback_messages.clone()) {
+                    Ok(formatted_feedback) => {
+                        feedback_string = formatted_feedback;
+                        debug!("Updated feedback for next interaction: {}", feedback_string);
+                    },
+                    Err(e) => {
+                        warn!("Failed to format feedback: {}", e);
+                        // Keep the previous feedback string if formatting fails
+                    }
+                }
             }
             info!("User message: {}", gemini_response.user_message);
             println!("\n{}", gemini_response.user_message);
