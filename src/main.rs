@@ -6,6 +6,10 @@ use serde_json::json;
 use std::{env, fs, path::Path, process::Command as ProcessCommand};
 use thiserror::Error;
 
+// Constants for API configuration
+const DEFAULT_GEMINI_API_ENDPOINT: &str = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent";
+const GEMINI_API_ENDPOINT_ENV_VAR: &str = "GEMINI_API_ENDPOINT";
+
 /// Custom error type for the application
 /// 
 /// Represents all possible errors that can occur in the application.
@@ -224,6 +228,16 @@ struct CommandFeedback {
     message: String,
 }
 
+/// Gets the Gemini API endpoint from environment variable or uses the default
+///
+/// # Returns
+///
+/// * `String` - The Gemini API endpoint URL
+fn get_gemini_api_endpoint() -> String {
+    env::var(GEMINI_API_ENDPOINT_ENV_VAR)
+        .unwrap_or_else(|_| DEFAULT_GEMINI_API_ENDPOINT.to_string())
+}
+
 /// Communicates with the Gemini API in chat mode
 ///
 /// Sends a query to the Gemini 2.0 Flash Thinking model and returns the response.
@@ -245,8 +259,7 @@ async fn chat_with_gemini(
     feedback: &str,
 ) -> Result<GeminiApiResponse, AppError> {
     let client = Client::new();
-    let gemini_api_endpoint =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent";
+    let gemini_api_endpoint = get_gemini_api_endpoint();
 
     let prompt_content = format!(
         "You are a helpful coding assistant. You will receive system information and user queries. Respond with a JSON object containing 'commands' and 'user_message'. 'commands' is an array of command objects, each with a 'type' and command-specific fields. Supported commands:\n- 'create_folder': {{ \"type\": \"create_folder\", \"path\": \"<folder_path>\" }}\n- 'create_file': {{ \"type\": \"create_file\", \"path\": \"<file_path>\" }}\n- 'write_code_to_file': {{ \"type\": \"write_code_to_file\", \"path\": \"<file_path>\", \"code\": \"<code_string>\" }}\n- 'execute_command': {{ \"type\": \"execute_command\", \"command\": \"<command_string>\" }}\n'user_message' is a string for user feedback after execution.\n\n**Feedback Loop:** After I execute your commands, I will provide feedback on their success or failure in subsequent queries. Use this feedback to improve your command generation. If a command fails, try to correct it or adjust your approach in the next turn.\n\nExample response for 'please build a hello-world python app for me':\n{{\n  \"commands\": [\n    {{\"type\": \"create_folder\", \"path\": \"user_projects\"}},\n    {{\"type\": \"create_file\", \"path\": \"user_projects/hello_world.py\"}},\n    {{\"type\": \"write_code_to_file\", \"path\": \"user_projects/hello_world.py\", \"code\": \"print('Hello, World!')\"}},\n    {{\"type\": \"execute_command\", \"command\": \"python user_projects/hello_world.py\"}}\n  ],\n  \"user_message\": \"Here is a hello-world Python app in 'user_projects'. It has been created and executed.\" \n}}\n\nSystem Information:\n{}\n\nPrevious Command Feedback (if any):\n{}\n\nUser Query:\n{}",
@@ -309,8 +322,7 @@ async fn execute_with_gemini(
     api_key: &str,
 ) -> Result<GeminiApiResponse, AppError> {
     let client = Client::new();
-    let gemini_api_endpoint =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent";
+    let gemini_api_endpoint = get_gemini_api_endpoint();
 
     let request_body = json!({
         "tools": [{"code_execution": {}}],
@@ -376,8 +388,7 @@ async fn create_codebase_with_gemini(
     api_key: &str,
 ) -> Result<GeminiApiResponse, AppError> {
     let client = Client::new();
-    let gemini_api_endpoint =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent";
+    let gemini_api_endpoint = get_gemini_api_endpoint();
 
     // Create the output directory if it doesn't exist
     let output_path = Path::new(output_dir);
