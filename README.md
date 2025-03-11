@@ -4,12 +4,14 @@ A Rust CLI application that interfaces with Google's Gemini API to generate and 
 
 ## Features
 
-- **Chat with Gemini**: Interact with the Gemini Pro model to get responses to your queries
+- **Chat with Gemini**: Interact with the Gemini 2.0 Flash Thinking model to get responses to your queries
 - **Execute Code**: Use the Gemini 1.5 Flash model to execute code snippets
 - **Create Codebases**: Generate complete codebases from natural language descriptions
 - **Command feedback loop for iterative improvements**
 - **Support for file and folder creation, code writing, and command execution**
 - **Direct code execution using Gemini 1.5 Flash model**
+- **Robust error handling** with custom error types and proper error propagation
+- **Configurable logging** for better debugging and verbosity control
 
 ## Prerequisites
 
@@ -36,7 +38,7 @@ A Rust CLI application that interfaces with Google's Gemini API to generate and 
 
 ### Chat Mode
 
-To chat with the Gemini Pro model:
+To chat with the Gemini 2.0 Flash Thinking model:
 
 ```bash
 cargo run -- chat --query "What is Rust programming language?"
@@ -60,13 +62,30 @@ cargo run -- create-codebase --description "A React application with a Node.js b
 
 This will generate a complete codebase based on your description in the specified output directory.
 
+### Logging
+
+The application uses the `env_logger` crate for logging. You can control the log level using the `RUST_LOG` environment variable:
+
+```bash
+# Show only error messages
+RUST_LOG=error cargo run -- chat --query "What is Rust?"
+
+# Show info and above (info, warn, error)
+RUST_LOG=info cargo run -- execute --query "Write a Python hello world"
+
+# Show all log messages including debug and trace
+RUST_LOG=trace cargo run -- create-codebase --description "Simple web app" --output-dir test_app
+```
+
+Common log levels from least to most verbose: error, warn, info, debug, trace
+
 ## Supported Commands
 
 The application supports three main modes:
 
 ### Chat Mode
 
-In chat mode, the Gemini model will respond with structured commands that this CLI can execute:
+In chat mode, the Gemini 2.0 Flash Thinking model will respond with structured commands that this CLI can execute:
 
 1. `create_folder`: Create a new directory
 2. `create_file`: Create an empty file
@@ -99,6 +118,9 @@ The application requires a valid Gemini API key to function. You can obtain one 
 - clap: For command-line argument parsing
 - reqwest: For making HTTP requests
 - tokio: For asynchronous runtime
+- log, env_logger: For configurable logging
+- thiserror: For custom error types
+- regex: For pattern matching in code extraction
 
 ## License
 

@@ -1,8 +1,41 @@
 use clap::Parser;
+use log::{debug, error, info, trace, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{env, fs, path::Path, process::Command as ProcessCommand};
+use thiserror::Error;
+
+// Custom error type for the application
+#[derive(Error, Debug)]
+pub enum AppError {
+    #[error("API error: {0}")]
+    ApiError(String),
+    
+    #[error("JSON parsing error: {0}")]
+    JsonParseError(#[from] serde_json::Error),
+    
+    #[error("IO error: {0}")]
+    IoError(#[from] std::io::Error),
+    
+    #[error("HTTP error: {0}")]
+    HttpError(#[from] reqwest::Error),
+    
+    #[error("Environment error: {0}")]
+    EnvError(String),
+    
+    #[error("Command execution error: {0}")]
+    CommandError(String),
+    
+    #[error("Response error: {0}")]
+    ResponseError(String),
+}
+
+impl From<String> for AppError {
+    fn from(error: String) -> Self {
+        AppError::ResponseError(error)
+    }
+}
 
 #[derive(Parser, Debug)]
 #[command(version = "1.0", about = "Interactive CLI with Gemini")]
@@ -129,10 +162,10 @@ async fn chat_with_gemini(
     system_info: &str,
     api_key: &str,
     feedback: &str,
-) -> Result<GeminiApiResponse, Box<dyn std::error::Error>> {
+) -> Result<GeminiApiResponse, AppError> {
     let client = Client::new();
     let gemini_api_endpoint =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent";
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent";
 
     let prompt_content = format!(
         "You are a helpful coding assistant. You will receive system information and user queries. Respond with a JSON object containing 'commands' and 'user_message'. 'commands' is an array of command objects, each with a 'type' and command-specific fields. Supported commands:\n- 'create_folder': {{ \"type\": \"create_folder\", \"path\": \"<folder_path>\" }}\n- 'create_file': {{ \"type\": \"create_file\", \"path\": \"<file_path>\" }}\n- 'write_code_to_file': {{ \"type\": \"write_code_to_file\", \"path\": \"<file_path>\", \"code\": \"<code_string>\" }}\n- 'execute_command': {{ \"type\": \"execute_command\", \"command\": \"<command_string>\" }}\n'user_message' is a string for user feedback after execution.\n\n**Feedback Loop:** After I execute your commands, I will provide feedback on their success or failure in subsequent queries. Use this feedback to improve your command generation. If a command fails, try to correct it or adjust your approach in the next turn.\n\nExample response for 'please build a hello-world python app for me':\n{{\n  \"commands\": [\n    {{\"type\": \"create_folder\", \"path\": \"user_projects\"}},\n    {{\"type\": \"create_file\", \"path\": \"user_projects/hello_world.py\"}},\n    {{\"type\": \"write_code_to_file\", \"path\": \"user_projects/hello_world.py\", \"code\": \"print('Hello, World!')\"}},\n    {{\"type\": \"execute_command\", \"command\": \"python user_projects/hello_world.py\"}}\n  ],\n  \"user_message\": \"Here is a hello-world Python app in 'user_projects'. It has been created and executed.\" \n}}\n\nSystem Information:\n{}\n\nPrevious Command Feedback (if any):\n{}\n\nUser Query:\n{}",
@@ -145,7 +178,7 @@ async fn chat_with_gemini(
         }]
     });
 
-    println!("Sending request to Gemini Pro API...");
+    info!("Sending request to Gemini Pro API...");
 
     let response = client
         .post(gemini_api_endpoint)
@@ -158,23 +191,22 @@ async fn chat_with_gemini(
     let status = response.status();
     let response_text = response.text().await?;
 
-    println!("API Response Status: {}", status);
+    info!("API Response Status: {}", status);
 
     if !status.is_success() {
-        println!("API Error Response: {}", response_text);
-        return Err(format!(
+        error!("API Error Response: {}", response_text);
+        return Err(AppError::ApiError(format!(
             "API request failed with status {}: {}",
             status, response_text
-        )
-        .into());
+        )));
     }
 
     match serde_json::from_str::<GeminiApiResponse>(&response_text) {
         Ok(api_response) => Ok(api_response),
         Err(e) => {
-            println!("Failed to parse API response: {}", e);
-            println!("Response text: {}", response_text);
-            Err(format!("Failed to parse API response: {}", e).into())
+            error!("Failed to parse API response: {}", e);
+            error!("Response text: {}", response_text);
+            Err(AppError::JsonParseError(e))
         }
     }
 }
@@ -182,7 +214,7 @@ async fn chat_with_gemini(
 async fn execute_with_gemini(
     query: &str,
     api_key: &str,
-) -> Result<GeminiApiResponse, Box<dyn std::error::Error>> {
+) -> Result<GeminiApiResponse, AppError> {
     let client = Client::new();
     let gemini_api_endpoint =
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent";
@@ -197,7 +229,7 @@ async fn execute_with_gemini(
         ]
     });
 
-    println!("Sending request to Gemini API...");
+    info!("Sending request to Gemini API...");
 
     let response = client
         .post(gemini_api_endpoint)
@@ -210,25 +242,24 @@ async fn execute_with_gemini(
     let status = response.status();
     let response_text = response.text().await?;
 
-    println!("API Response Status: {}", status);
+    info!("API Response Status: {}", status);
 
     if !status.is_success() {
-        println!("API Error Response: {}", response_text);
-        return Err(format!(
+        error!("API Error Response: {}", response_text);
+        return Err(AppError::ApiError(format!(
             "API request failed with status {}: {}",
             status, response_text
-        )
-        .into());
+        )));
     }
 
-    println!("API Response: {}", response_text);
+    info!("API Response received. Processing...");
 
     match serde_json::from_str::<GeminiApiResponse>(&response_text) {
         Ok(api_response) => Ok(api_response),
         Err(e) => {
-            println!("Failed to parse API response: {}", e);
-            println!("Response text: {}", response_text);
-            Err(format!("Failed to parse API response: {}", e).into())
+            error!("Failed to parse API response: {}", e);
+            error!("Response text: {}", response_text);
+            Err(AppError::JsonParseError(e))
         }
     }
 }
@@ -237,7 +268,7 @@ async fn create_codebase_with_gemini(
     description: &str,
     output_dir: &str,
     api_key: &str,
-) -> Result<GeminiApiResponse, Box<dyn std::error::Error>> {
+) -> Result<GeminiApiResponse, AppError> {
     let client = Client::new();
     let gemini_api_endpoint =
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-thinking-exp-01-21:generateContent";
@@ -279,7 +310,7 @@ async fn create_codebase_with_gemini(
         ]
     });
 
-    println!("Sending request to Gemini API to create codebase...");
+    info!("Sending request to Gemini API to create codebase...");
 
     let response = client
         .post(gemini_api_endpoint)
@@ -292,307 +323,302 @@ async fn create_codebase_with_gemini(
     let status = response.status();
     let response_text = response.text().await?;
 
-    println!("API Response Status: {}", status);
+    info!("API Response Status: {}", status);
 
     if !status.is_success() {
-        println!("API Error Response: {}", response_text);
-        return Err(format!(
+        error!("API Error Response: {}", response_text);
+        return Err(AppError::ApiError(format!(
             "API request failed with status {}: {}",
             status, response_text
-        )
-        .into());
+        )));
     }
 
-    println!("API Response received. Processing...");
+    info!("API Response received. Processing...");
 
     match serde_json::from_str::<GeminiApiResponse>(&response_text) {
         Ok(api_response) => Ok(api_response),
         Err(e) => {
-            println!("Failed to parse API response: {}", e);
-            println!("Response text: {}", response_text);
-            Err(format!("Failed to parse API response: {}", e).into())
+            error!("Failed to parse API response: {}", e);
+            error!("Response text: {}", response_text);
+            Err(AppError::JsonParseError(e))
         }
     }
 }
 
-fn create_files_from_response(
-    text: &str,
-    output_dir: &str,
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    // Try to find patterns like "## filename.py" or "File: filename.py" in the text
+/// Infers a file extension based on the content of the code
+fn infer_extension_from_content(content: &str) -> String {
+    if content.contains("<?php") {
+        return "php".to_string();
+    } else if content.contains("<!DOCTYPE html") || content.contains("<html") {
+        return "html".to_string();
+    } else if content.contains("import React") || content.contains("from 'react'") {
+        return "jsx".to_string();
+    } else if content.contains("import ") && content.contains("from '") && content.contains("export ") {
+        return "js".to_string();
+    } else if content.contains("#include <") {
+        if content.contains("iostream") {
+            return "cpp".to_string();
+        } else {
+            return "c".to_string();
+        }
+    } else if content.contains("package ") && content.contains("import ") && content.contains("public class ") {
+        return "java".to_string();
+    } else if content.contains("def ") && content.contains("import ") {
+        return "py".to_string();
+    } else if content.contains("fn ") && content.contains("pub ") && content.contains("use ") {
+        return "rs".to_string();
+    }
+
+    // Default to txt if we can't infer
+    trace!("Could not infer extension from content, defaulting to txt");
+    "txt".to_string()
+}
+
+/// Returns a file extension based on the language name
+fn get_extension_from_language(language: &str) -> String {
+    match language.to_lowercase().as_str() {
+        "python" | "py" => "py",
+        "javascript" | "js" => "js",
+        "typescript" | "ts" => "ts",
+        "jsx" => "jsx",
+        "tsx" => "tsx",
+        "html" => "html",
+        "css" => "css",
+        "rust" | "rs" => "rs",
+        "go" => "go",
+        "java" => "java",
+        "c" => "c",
+        "cpp" | "c++" => "cpp",
+        "csharp" | "cs" => "cs",
+        "php" => "php",
+        "ruby" | "rb" => "rb",
+        "shell" | "sh" | "bash" => "sh",
+        "sql" => "sql",
+        "json" => "json",
+        "yaml" | "yml" => "yml",
+        "markdown" | "md" => "md",
+        "dockerfile" => "Dockerfile",
+        "makefile" => "Makefile",
+        _ => "txt",
+    }.to_string()
+}
+
+/// Extracts files from markdown text using headers and code blocks
+fn extract_files_from_markdown(text: &str) -> Vec<(String, String)> {
     let mut files = Vec::new();
+    let mut current_file = None;
+    let mut current_content = String::new();
+
+    // Split the text into lines for processing
+    let lines: Vec<&str> = text.lines().collect();
+
+    for (_i, line) in lines.iter().enumerate() {
+        // Check for file header pattern: "```filename" or "```language:filename"
+        if line.starts_with("```") && !line.trim_start_matches('`').is_empty() {
+            // If we were already collecting a file, save it before starting a new one
+            if let Some(filename) = current_file.take() {
+                debug!("Extracted file from markdown: {}", filename);
+                files.push((filename, current_content.clone()));
+                current_content.clear();
+            }
+
+            let header = line.trim_start_matches('`').trim();
+            
+            // Handle different code block formats
+            if header.contains(':') {
+                // Format: ```language:filename
+                let parts: Vec<&str> = header.splitn(2, ':').collect();
+                if parts.len() == 2 {
+                    let filename = parts[1].trim();
+                    current_file = Some(filename.to_string());
+                    trace!("Found file in markdown with language prefix: {}", filename);
+                }
+            } else if !header.contains(' ') {
+                // Format: ```filename
+                current_file = Some(header.to_string());
+                trace!("Found file in markdown: {}", header);
+            }
+        }
+        // Check for end of code block
+        else if line.trim() == "```" && current_file.is_some() {
+            if let Some(filename) = current_file.take() {
+                debug!("Completed extraction of file: {}", filename);
+                files.push((filename, current_content.clone()));
+                current_content.clear();
+            }
+        }
+        // If we're inside a code block, collect the content
+        else if current_file.is_some() {
+            current_content.push_str(line);
+            current_content.push('\n');
+        }
+    }
+
+    // Handle case where the last code block doesn't have a closing ```
+    if let Some(filename) = current_file {
+        debug!("Extracted file from markdown (unclosed block): {}", filename);
+        files.push((filename, current_content));
+    }
+
+    info!("Extracted {} files from markdown", files.len());
+    files
+}
+
+/// Extracts files from code blocks
+fn extract_files_from_code_blocks(text: &str) -> Vec<(String, String)> {
+    let mut files = Vec::new();
+    let re = regex::Regex::new(r"(?m)^```(\w+)?\s*\n([\s\S]*?)^```").unwrap();
+
+    // Counter for generating unique filenames
+    let mut counter = 1;
+
+    for cap in re.captures_iter(text) {
+        let language = cap.get(1).map_or("txt", |m| m.as_str());
+        let content = cap.get(2).map_or("", |m| m.as_str());
+
+        // Generate a filename based on the language and counter
+        let extension = get_extension_from_language(language);
+        let filename = format!("file_{}.{}", counter, extension);
+        counter += 1;
+
+        debug!("Extracted code block: {} (language: {})", filename, language);
+        files.push((filename, content.to_string()));
+    }
+
+    info!("Extracted {} files from code blocks", files.len());
+    files
+}
+
+/// Cleans and validates a file path
+fn clean_and_validate_file_path(file_path: &str) -> Result<String, AppError> {
+    let path = file_path.trim();
+    
+    // Check for suspicious paths
+    if path.contains("..") || path.starts_with('/') || path.starts_with('\\') {
+        warn!("Suspicious file path detected: {}", path);
+        return Err(AppError::ResponseError(format!("Suspicious file path: {}", path)));
+    }
+    
+    // Normalize path separators
+    let normalized_path = path.replace('\\', "/");
+    
+    trace!("Normalized file path: {} -> {}", path, normalized_path);
+    Ok(normalized_path)
+}
+
+/// Writes files to disk and returns a list of created file paths
+fn write_files_to_disk(
+    files: Vec<(String, String)>,
+    output_dir: &str,
+) -> Result<Vec<String>, AppError> {
+    let mut created_files = Vec::new();
     let mut file_counter = 0;
 
-    // First, try to extract files based on markdown patterns
-    let mut lines = text.lines().peekable();
-    let mut current_filename = String::new();
-    let mut in_code_block = false;
-    let mut current_code = String::new();
-    let mut current_language = String::new();
-
-    while let Some(line) = lines.next() {
-        // Check for file headers
-        if (line.starts_with("## ") || line.starts_with("### ")) && !in_code_block {
-            // If we have a previous file, save it
-            if !current_filename.is_empty() && !current_code.is_empty() {
-                files.push((current_filename.clone(), current_code.clone()));
-                current_code.clear();
-            }
-
-            // Extract filename from header
-            let header_parts: Vec<&str> = line
-                .trim_start_matches('#')
-                .trim()
-                .split_whitespace()
-                .collect();
-            if !header_parts.is_empty() {
-                current_filename = header_parts[0].to_string();
-            }
-        }
-        // Check for "File:" pattern
-        else if line.contains("File:") && !in_code_block {
-            // If we have a previous file, save it
-            if !current_filename.is_empty() && !current_code.is_empty() {
-                files.push((current_filename.clone(), current_code.clone()));
-                current_code.clear();
-            }
-
-            // Extract filename
-            let parts: Vec<&str> = line.split("File:").collect();
-            if parts.len() > 1 {
-                current_filename = parts[1].trim().to_string();
-            }
-        }
-        // Handle code blocks
-        else if line.trim().starts_with("```") {
-            if !in_code_block {
-                in_code_block = true;
-                // Extract language if specified
-                current_language = line
-                    .trim()
-                    .strip_prefix("```")
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-            } else {
-                in_code_block = false;
-
-                // If we have a filename and code, save it
-                if !current_code.is_empty() {
-                    // If no filename was found, generate one based on the language
-                    if current_filename.is_empty() {
-                        file_counter += 1;
-                        let extension = match current_language.to_lowercase().as_str() {
-                            "python" | "py" => ".py",
-                            "javascript" | "js" => ".js",
-                            "html" => ".html",
-                            "css" => ".css",
-                            "json" => ".json",
-                            "rust" | "rs" => ".rs",
-                            "markdown" | "md" => ".md",
-                            _ => ".txt",
-                        };
-                        current_filename = format!("file_{}{}", file_counter, extension);
-                    }
-
-                    files.push((current_filename.clone(), current_code.clone()));
-                    current_code.clear();
-                    current_filename.clear();
-                }
-            }
-        }
-        // Collect code content
-        else if in_code_block {
-            current_code.push_str(line);
-            current_code.push('\n');
-        }
-    }
-
-    // Add the last file if there is one
-    if !current_filename.is_empty() && !current_code.is_empty() {
-        files.push((current_filename, current_code));
-    }
-
-    // If no files were found with the above method, use a more generic approach
-    if files.is_empty() {
-        // Look for code blocks with language specifiers
-        let mut in_code_block = false;
-        let mut language = String::new();
-        let mut code_content = String::new();
-
-        for line in text.lines() {
-            if line.trim().starts_with("```") {
-                if !in_code_block {
-                    // Start of code block
-                    in_code_block = true;
-                    language = line
-                        .trim()
-                        .strip_prefix("```")
-                        .unwrap_or("")
-                        .trim()
-                        .to_string();
-                    code_content.clear();
-                } else {
-                    // End of code block
-                    in_code_block = false;
-
-                    // Generate a filename based on the language if we have code
-                    if !code_content.is_empty() {
-                        file_counter += 1;
-                        let extension = match language.to_lowercase().as_str() {
-                            "python" | "py" => ".py",
-                            "javascript" | "js" => ".js",
-                            "html" => ".html",
-                            "css" => ".css",
-                            "json" => ".json",
-                            "rust" | "rs" => ".rs",
-                            "markdown" | "md" => ".md",
-                            _ => ".txt",
-                        };
-
-                        let filename = format!("file_{}{}", file_counter, extension);
-                        files.push((filename, code_content.clone()));
-                    }
-                }
-            } else if in_code_block {
-                code_content.push_str(line);
-                code_content.push('\n');
-            }
-        }
-    }
-
-    // Process the extracted files
-    let mut created_files = Vec::new();
-
-    for (mut file_path, content) in files {
-        // Clean up file path (remove quotes, etc.)
-        file_path = file_path
-            .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c.is_whitespace())
-            .to_string();
-
-        // If the file path doesn't have an extension, try to infer one from the content
-        if !file_path.contains('.') {
-            let extension = if content.contains("def ") || content.contains("import ") {
-                ".py"
-            } else if content.contains("function")
-                || content.contains("const ")
-                || content.contains("let ")
-                || content.contains("var ")
-            {
-                ".js"
-            } else if content.contains("<html") || content.contains("<!DOCTYPE html") {
-                ".html"
-            } else if content.contains("body {") || content.contains("margin:") {
-                ".css"
-            } else if content.trim().starts_with("{") && content.trim().ends_with("}") {
-                ".json"
-            } else if content.contains("fn ")
-                || content.contains("struct ")
-                || content.contains("impl ")
-            {
-                ".rs"
-            } else if content.contains("# ") || content.contains("## ") {
-                ".md"
-            } else {
-                ".txt"
-            };
-            file_path = format!("{}{}", file_path, extension);
-        }
-
-        // If we still don't have a valid filename, generate one
-        if file_path.is_empty()
-            || file_path == "."
-            || file_path == ".."
-            || file_path.starts_with("File:")
-        {
-            file_counter += 1;
-
-            // Try to infer file type from content
-            let extension = if content.contains("def ") || content.contains("import ") {
-                ".py"
-            } else if content.contains("function")
-                || content.contains("const ")
-                || content.contains("let ")
-                || content.contains("var ")
-            {
-                ".js"
-            } else if content.contains("<html") || content.contains("<!DOCTYPE html") {
-                ".html"
-            } else if content.contains("body {") || content.contains("margin:") {
-                ".css"
-            } else if content.trim().starts_with("{") && content.trim().ends_with("}") {
-                ".json"
-            } else if content.contains("fn ")
-                || content.contains("struct ")
-                || content.contains("impl ")
-            {
-                ".rs"
-            } else if content.contains("# ") || content.contains("## ") {
-                ".md"
-            } else {
-                ".txt"
-            };
-
-            file_path = format!("file_{}{}", file_counter, extension);
-        }
-
+    for (file_path, content) in files {
+        file_counter += 1;
+        
+        // Clean and validate the file path
+        let clean_path = clean_and_validate_file_path(&file_path)?;
+        
+        // If the file doesn't have an extension, try to infer one from the content
+        let final_path = if !clean_path.contains('.') {
+            let extension = infer_extension_from_content(&content);
+            format!("{}.{}", clean_path, extension)
+        } else {
+            clean_path
+        };
+        
         // Create the full path
-        let full_path = Path::new(output_dir).join(&file_path);
-
+        let full_path = Path::new(output_dir).join(&final_path);
+        
         // Create parent directories if they don't exist
         if let Some(parent) = full_path.parent() {
-            if !parent.exists() {
-                fs::create_dir_all(parent)?;
-            }
+            debug!("Creating parent directory: {}", parent.display());
+            fs::create_dir_all(parent)?;
         }
 
         // Write the file
         fs::write(&full_path, content)?;
-        println!("Created file: {}", full_path.display());
+        info!("Created file: {}", full_path.display());
         created_files.push(full_path.to_string_lossy().to_string());
     }
 
+    info!("Successfully created {} files", file_counter);
     Ok(created_files)
 }
 
-fn get_system_info() -> String {
-    format!(
-        "OS: {}\nArch: {}\nDir: {:?}",
-        env::consts::OS,
-        env::consts::ARCH,
-        env::current_dir().unwrap_or_default()
+/// Creates files from a text response containing code blocks and file information
+fn create_files_from_response(
+    text: &str,
+    output_dir: &str,
+) -> Result<Vec<String>, AppError> {
+    // First, try to extract files based on markdown patterns
+    let mut files = extract_files_from_markdown(text);
+
+    // If no files were found using markdown pattern, try to extract code blocks
+    if files.is_empty() {
+        debug!("No files found using markdown pattern, trying code blocks extraction");
+        files = extract_files_from_code_blocks(text);
+    }
+
+    // If still no files, treat the entire response as a single file
+    if files.is_empty() {
+        warn!("No files found in structured format, treating entire response as a single file");
+        files.push(("README.md".to_string(), text.to_string()));
+    }
+
+    write_files_to_disk(
+        files,
+        output_dir
     )
 }
 
-async fn execute_command(command: &str) -> Result<String, String> {
+async fn execute_command(command: &str) -> Result<String, AppError> {
     let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
-        return Err("Empty command".to_string());
+        error!("Empty command provided");
+        return Err(AppError::CommandError("Empty command".to_string()));
     }
     let cmd = parts[0];
     let args = &parts[1..];
+    
+    debug!("Executing command: {} with args: {:?}", cmd, args);
+    
     let output = ProcessCommand::new(cmd)
         .args(args)
         .output()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            error!("Failed to execute command: {}", e);
+            AppError::IoError(e)
+        })?;
+        
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        debug!("Command executed successfully");
+        trace!("Command output: {}", stdout);
+        Ok(stdout)
     } else {
-        Err(String::from_utf8_lossy(&output.stderr).to_string())
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        error!("Command execution failed: {}", stderr);
+        Err(AppError::CommandError(stderr))
     }
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), AppError> {
+    // Initialize the logger
+    env_logger::init();
+    
     let cli = Cli::parse();
 
     // Get API key from environment variable or prompt user if not set
     let api_key = match env::var("GEMINI_API_KEY") {
         Ok(key) => key,
         Err(_) => {
-            eprintln!("Error: GEMINI_API_KEY environment variable not set");
-            eprintln!("Please set it with: export GEMINI_API_KEY=your_api_key_here");
-            return Ok(());
+            error!("GEMINI_API_KEY environment variable not set");
+            return Err(AppError::EnvError(
+                "GEMINI_API_KEY environment variable not set. Please set it with: export GEMINI_API_KEY=your_api_key_here".to_string()
+            ));
         }
     };
 
@@ -602,162 +628,175 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     match &cli.command {
         Commands::Chat { query } => {
-            println!("User Query: '{}'", query);
-            match chat_with_gemini(query, &system_info, &api_key, &feedback_string).await {
-                Ok(gemini_response) => {
-                    if let Some(candidates) = gemini_response.candidates {
-                        if let Some(candidate) = candidates.get(0) {
-                            // Find the text part in the response
-                            let mut text_content = String::new();
-                            for part in &candidate.content.parts {
-                                if let Part::Text { text } = part {
-                                    text_content.push_str(&text);
-                                    break;
-                                }
-                            }
-
-                            if !text_content.is_empty() {
-                                match serde_json::from_str::<GeminiResponse>(&text_content) {
-                                    Ok(gemini_response) => {
-                                        feedback_messages.clear();
-                                        for cmd in gemini_response.commands {
-                                            let feedback = match cmd {
-                                                GeminiCommand::CreateFolder { path } => {
-                                                    println!("Creating folder: {}", path);
-                                                    let result = fs::create_dir_all(&path);
-                                                    CommandFeedback {
-                                                        command_type: "create_folder".to_string(),
-                                                        command_details: format!("path: {}", path),
-                                                        status: if result.is_ok() {
-                                                            CommandStatus::Success
-                                                        } else {
-                                                            CommandStatus::Failure
-                                                        },
-                                                        message: result
-                                                            .map(|_| "Folder created".to_string())
-                                                            .unwrap_or_else(|e| e.to_string()),
-                                                    }
-                                                }
-                                                GeminiCommand::CreateFile { path, content } => {
-                                                    println!("Creating file: {}", path);
-                                                    let result = fs::write(&path, &content);
-                                                    CommandFeedback {
-                                                        command_type: "create_file".to_string(),
-                                                        command_details: format!("path: {}", path),
-                                                        status: if result.is_ok() {
-                                                            CommandStatus::Success
-                                                        } else {
-                                                            CommandStatus::Failure
-                                                        },
-                                                        message: result
-                                                            .map(|_| "File created".to_string())
-                                                            .unwrap_or_else(|e| e.to_string()),
-                                                    }
-                                                }
-                                                GeminiCommand::ExecuteCommand { command, args } => {
-                                                    println!("Executing: {}", command);
-                                                    let result = execute_command(&format!(
-                                                        "{} {}",
-                                                        command,
-                                                        args.join(" ")
-                                                    ))
-                                                    .await;
-                                                    CommandFeedback {
-                                                        command_type: "execute_command".to_string(),
-                                                        command_details: format!(
-                                                            "command: {}",
-                                                            command
-                                                        ),
-                                                        status: if result.is_ok() {
-                                                            CommandStatus::Success
-                                                        } else {
-                                                            CommandStatus::Failure
-                                                        },
-                                                        message: result.unwrap_or_else(|e| e),
-                                                    }
-                                                }
-                                            };
-                                            feedback_messages.push(feedback);
-                                        }
-                                        println!("\n{}", gemini_response.user_message);
-                                    }
-                                    Err(e) => eprintln!(
-                                        "Failed to parse JSON: {}\nRaw: {}",
-                                        e, text_content
-                                    ),
-                                }
-                            } else {
-                                eprintln!("No text content in response");
-                            }
-                        } else {
-                            eprintln!("No candidates in response");
-                        }
-                    } else if let Some(prompt_feedback) = gemini_response.prompt_feedback {
-                        if let Some(block_reason) = prompt_feedback.block_reason {
-                            eprintln!("Request was blocked: {}", block_reason);
-                        } else {
-                            eprintln!("No candidates received from Gemini API");
-                        }
+            info!("User Query: '{}'", query);
+            
+            let gemini_response = chat_with_gemini(query, &system_info, &api_key, &feedback_string)
+                .await
+                .map_err(|e| AppError::ApiError(format!("Error communicating with Gemini API: {}", e)))?;
+            
+            let candidates = gemini_response.candidates.ok_or_else(|| {
+                if let Some(prompt_feedback) = gemini_response.prompt_feedback {
+                    if let Some(block_reason) = prompt_feedback.block_reason {
+                        error!("Request was blocked: {}", block_reason);
+                        AppError::ResponseError(format!("Request was blocked: {}", block_reason))
                     } else {
-                        eprintln!("No candidates received from Gemini API");
+                        error!("No candidates received from Gemini API");
+                        AppError::ResponseError("No candidates received from Gemini API".to_string())
                     }
+                } else {
+                    error!("No candidates received from Gemini API");
+                    AppError::ResponseError("No candidates received from Gemini API".to_string())
                 }
-                Err(e) => {
-                    eprintln!("Error communicating with Gemini API: {}", e);
+            })?;
+            
+            let candidate = candidates.get(0).ok_or_else(|| {
+                error!("No candidates in response");
+                AppError::ResponseError("No candidates in response".to_string())
+            })?;
+            
+            // Find the text part in the response
+            let mut text_content = String::new();
+            for part in &candidate.content.parts {
+                if let Part::Text { text } = part {
+                    text_content.push_str(&text);
+                    break;
                 }
             }
+
+            if text_content.is_empty() {
+                error!("No text content in response");
+                return Err(AppError::ResponseError("No text content in response".to_string()));
+            }
+            
+            debug!("Received text content: {}", text_content);
+            
+            let gemini_response = serde_json::from_str::<GeminiResponse>(&text_content)
+                .map_err(|e| {
+                    error!("Failed to parse JSON: {}\nRaw: {}", e, text_content);
+                    AppError::JsonParseError(e)
+                })?;
+            
+            feedback_messages.clear();
+            for cmd in gemini_response.commands {
+                let feedback = match cmd {
+                    GeminiCommand::CreateFolder { path } => {
+                        info!("Creating folder: {}", path);
+                        let result = fs::create_dir_all(&path);
+                        CommandFeedback {
+                            command_type: "create_folder".to_string(),
+                            command_details: format!("path: {}", path),
+                            status: if result.is_ok() {
+                                CommandStatus::Success
+                            } else {
+                                error!("Failed to create folder: {}", path);
+                                CommandStatus::Failure
+                            },
+                            message: result
+                                .map(|_| "Folder created".to_string())
+                                .unwrap_or_else(|e| e.to_string()),
+                        }
+                    }
+                    GeminiCommand::CreateFile { path, content } => {
+                        info!("Creating file: {}", path);
+                        let result = fs::write(&path, &content);
+                        CommandFeedback {
+                            command_type: "create_file".to_string(),
+                            command_details: format!("path: {}", path),
+                            status: if result.is_ok() {
+                                CommandStatus::Success
+                            } else {
+                                error!("Failed to create file: {}", path);
+                                CommandStatus::Failure
+                            },
+                            message: result
+                                .map(|_| "File created".to_string())
+                                .unwrap_or_else(|e| e.to_string()),
+                        }
+                    }
+                    GeminiCommand::ExecuteCommand { command, args } => {
+                        info!("Executing: {}", command);
+                        let result = execute_command(&format!(
+                            "{} {}",
+                            command,
+                            args.join(" ")
+                        ))
+                        .await;
+                        CommandFeedback {
+                            command_type: "execute_command".to_string(),
+                            command_details: format!(
+                                "command: {}",
+                                command
+                            ),
+                            status: if result.is_ok() {
+                                CommandStatus::Success
+                            } else {
+                                error!("Failed to execute command: {}", command);
+                                CommandStatus::Failure
+                            },
+                            message: result.unwrap_or_else(|e| e.to_string()),
+                        }
+                    }
+                };
+                feedback_messages.push(feedback);
+            }
+            info!("User message: {}", gemini_response.user_message);
+            println!("\n{}", gemini_response.user_message);
         }
         Commands::Execute { query } => {
-            println!("User Query for Code Execution: '{}'", query);
-            match execute_with_gemini(query, &api_key).await {
-                Ok(gemini_response) => {
-                    if let Some(candidates) = gemini_response.candidates {
-                        if let Some(candidate) = candidates.get(0) {
-                            println!("\n--- Gemini Response ---");
-
-                            // Process each part of the response
-                            for part in &candidate.content.parts {
-                                match part {
-                                    Part::Text { text } => {
-                                        if !text.is_empty() {
-                                            println!("{}", text);
-                                        }
-                                    }
-                                    Part::ExecutableCode { executable_code } => {
-                                        println!(
-                                            "\n--- Generated Code ({}): ---",
-                                            executable_code.language
-                                        );
-                                        println!("{}", executable_code.code);
-                                        println!("--- End of Generated Code ---\n");
-                                    }
-                                    Part::CodeExecutionResult {
-                                        code_execution_result,
-                                    } => {
-                                        println!(
-                                            "\n--- Execution Result: {} ---",
-                                            code_execution_result.outcome
-                                        );
-                                        println!("{}", code_execution_result.output);
-                                        println!("--- End of Execution Result ---\n");
-                                    }
-                                }
-                            }
-                        } else {
-                            eprintln!("No candidates in response");
-                        }
-                    } else if let Some(prompt_feedback) = gemini_response.prompt_feedback {
-                        if let Some(block_reason) = prompt_feedback.block_reason {
-                            eprintln!("Request was blocked: {}", block_reason);
-                        } else {
-                            eprintln!("No candidates received from Gemini API");
-                        }
+            info!("User Query for Code Execution: '{}'", query);
+            
+            let gemini_response = execute_with_gemini(query, &api_key)
+                .await
+                .map_err(|e| AppError::ApiError(format!("Error communicating with Gemini API: {}", e)))?;
+            
+            let candidates = gemini_response.candidates.ok_or_else(|| {
+                if let Some(prompt_feedback) = gemini_response.prompt_feedback {
+                    if let Some(block_reason) = prompt_feedback.block_reason {
+                        error!("Request was blocked: {}", block_reason);
+                        AppError::ResponseError(format!("Request was blocked: {}", block_reason))
                     } else {
-                        eprintln!("No candidates received from Gemini API");
+                        error!("No candidates received from Gemini API");
+                        AppError::ResponseError("No candidates received from Gemini API".to_string())
                     }
+                } else {
+                    error!("No candidates received from Gemini API");
+                    AppError::ResponseError("No candidates received from Gemini API".to_string())
                 }
-                Err(e) => {
-                    eprintln!("Error communicating with Gemini API: {}", e);
+            })?;
+            
+            let candidate = candidates.get(0).ok_or_else(|| {
+                error!("No candidates in response");
+                AppError::ResponseError("No candidates in response".to_string())
+            })?;
+            
+            println!("\n--- Gemini Response ---");
+
+            // Process each part of the response
+            for part in &candidate.content.parts {
+                match part {
+                    Part::Text { text } => {
+                        if !text.is_empty() {
+                            info!("{}", text);
+                        }
+                    }
+                    Part::ExecutableCode { executable_code } => {
+                        info!(
+                            "\n--- Generated Code ({}): ---",
+                            executable_code.language
+                        );
+                        info!("{}", executable_code.code);
+                        info!("--- End of Generated Code ---\n");
+                    }
+                    Part::CodeExecutionResult {
+                        code_execution_result,
+                    } => {
+                        info!(
+                            "\n--- Execution Result: {} ---",
+                            code_execution_result.outcome
+                        );
+                        info!("{}", code_execution_result.output);
+                        info!("--- End of Execution Result ---\n");
+                    }
                 }
             }
         }
@@ -765,61 +804,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             description,
             output_dir,
         } => {
-            println!("Creating codebase with description: '{}'", description);
-            println!("Output directory: '{}'", output_dir);
+            info!("Creating codebase with description: '{}'", description);
+            info!("Output directory: '{}'", output_dir);
 
-            match create_codebase_with_gemini(description, output_dir, &api_key).await {
-                Ok(gemini_response) => {
-                    if let Some(candidates) = gemini_response.candidates {
-                        if let Some(candidate) = candidates.get(0) {
-                            // Find the text part in the response
-                            let mut text_content = String::new();
-                            for part in &candidate.content.parts {
-                                if let Part::Text { text } = part {
-                                    text_content.push_str(&text);
-                                }
-                            }
-
-                            if !text_content.is_empty() {
-                                println!("\n--- Creating Files from Gemini Response ---");
-                                match create_files_from_response(&text_content, output_dir) {
-                                    Ok(created_files) => {
-                                        println!("\n--- Codebase Creation Complete ---");
-                                        println!(
-                                            "Created {} files in {}",
-                                            created_files.len(),
-                                            output_dir
-                                        );
-                                        println!("\nFiles created:");
-                                        for file in created_files {
-                                            println!("- {}", file);
-                                        }
-                                    }
-                                    Err(e) => {
-                                        eprintln!("Error creating files: {}", e);
-                                    }
-                                }
-                            } else {
-                                eprintln!("No text content in response");
-                            }
-                        } else {
-                            eprintln!("No candidates in response");
-                        }
-                    } else if let Some(prompt_feedback) = gemini_response.prompt_feedback {
-                        if let Some(block_reason) = prompt_feedback.block_reason {
-                            eprintln!("Request was blocked: {}", block_reason);
-                        } else {
-                            eprintln!("No candidates received from Gemini API");
-                        }
+            let gemini_response = create_codebase_with_gemini(description, output_dir, &api_key)
+                .await
+                .map_err(|e| AppError::ApiError(format!("Error communicating with Gemini API: {}", e)))?;
+            
+            let candidates = gemini_response.candidates.ok_or_else(|| {
+                if let Some(prompt_feedback) = gemini_response.prompt_feedback {
+                    if let Some(block_reason) = prompt_feedback.block_reason {
+                        error!("Request was blocked: {}", block_reason);
+                        AppError::ResponseError(format!("Request was blocked: {}", block_reason))
                     } else {
-                        eprintln!("No candidates received from Gemini API");
+                        error!("No candidates received from Gemini API");
+                        AppError::ResponseError("No candidates received from Gemini API".to_string())
                     }
+                } else {
+                    error!("No candidates received from Gemini API");
+                    AppError::ResponseError("No candidates received from Gemini API".to_string())
                 }
-                Err(e) => {
-                    eprintln!("Error communicating with Gemini API: {}", e);
+            })?;
+            
+            let candidate = candidates.get(0).ok_or_else(|| {
+                error!("No candidates in response");
+                AppError::ResponseError("No candidates in response".to_string())
+            })?;
+            
+            // Find the text part in the response
+            let mut text_content = String::new();
+            for part in &candidate.content.parts {
+                if let Part::Text { text } = part {
+                    text_content.push_str(&text);
                 }
+            }
+
+            if text_content.is_empty() {
+                error!("No text content in response");
+                return Err(AppError::ResponseError("No text content in response".to_string()));
+            }
+            
+            info!("Received text content: {}", text_content);
+            
+            info!("--- Creating Files from Gemini Response ---");
+            let created_files = create_files_from_response(&text_content, output_dir)
+                .map_err(|e| AppError::ResponseError(format!("Error creating files: {}", e)))?;
+            
+            info!("--- Codebase Creation Complete ---");
+            info!("Created {} files in {}", created_files.len(), output_dir);
+            info!("Files created:");
+            for file in created_files {
+                info!("- {}", file);
             }
         }
     }
     Ok(())
+}
+
+fn get_system_info() -> String {
+    format!(
+        "OS: {}\nArch: {}\nDir: {:?}",
+        env::consts::OS,
+        env::consts::ARCH,
+        env::current_dir().unwrap_or_default()
+    )
 }
