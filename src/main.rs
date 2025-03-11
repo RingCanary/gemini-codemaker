@@ -3,7 +3,7 @@ use log::{debug, error, info, trace, warn};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::{env, fs, path::Path, process::Command as ProcessCommand};
+use std::{env, fs, io::Write, path::Path, process::Command as ProcessCommand};
 use thiserror::Error;
 
 // Constants for API configuration
@@ -73,9 +73,9 @@ struct Cli {
 enum Commands {
     /// Chat with Gemini and execute commands
     Chat {
-        /// The query to send to Gemini
+        /// The initial query to send to Gemini (optional, will prompt if not provided)
         #[arg(long)]
-        query: String,
+        query: Option<String>,
     },
     /// Execute code with Gemini
     Execute {
@@ -835,7 +835,35 @@ fn get_system_info() -> String {
     )
 }
 
-#[allow(dead_code)]
+/// Extracts JSON content from markdown code blocks
+///
+/// This function looks for JSON content wrapped in markdown code blocks (```json ... ```)
+/// and extracts the JSON content. If the content is not wrapped in code blocks, it returns
+/// the original content.
+///
+/// # Arguments
+///
+/// * `content` - The content potentially containing markdown code blocks
+///
+/// # Returns
+///
+/// * The extracted JSON content or the original content if no code blocks are found
+fn extract_json_from_markdown(content: &str) -> String {
+    // Check for markdown code blocks with JSON
+    if content.trim().starts_with("```json") && content.trim().ends_with("```") {
+        // Extract the content between the code blocks
+        let start_idx = content.find("```json").map(|i| i + 7).unwrap_or(0);
+        let end_idx = content.rfind("```").unwrap_or(content.len());
+        
+        if start_idx < end_idx {
+            return content[start_idx..end_idx].trim().to_string();
+        }
+    }
+    
+    // If no code blocks or extraction failed, return the original content
+    content.to_string()
+}
+
 /// Processes a command from the Gemini API
 ///
 /// Executes a command received from the Gemini API and returns feedback about the execution.
@@ -947,7 +975,6 @@ async fn process_command(
     }
 }
 
-#[allow(dead_code)]
 /// Processes the response from the Gemini API
 ///
 /// Extracts and executes commands from the Gemini API response.
@@ -1016,7 +1043,6 @@ async fn process_response(
     }
 }
 
-#[allow(dead_code)]
 /// Formats command feedback as a JSON string
 ///
 /// Converts a vector of CommandFeedback into a JSON string for sending back to Gemini.
@@ -1041,7 +1067,6 @@ fn format_feedback(feedback: Vec<CommandFeedback>) -> Result<String, AppError> {
     }
 }
 
-#[allow(dead_code)]
 /// Extracts text from a Gemini API response
 ///
 /// Gets the text content from the API response.
@@ -1104,7 +1129,7 @@ fn extract_text_from_response(response: GeminiApiResponse) -> Result<String, App
             return Err(AppError::ResponseError("Empty response from Gemini".to_string()));
         }
         
-        debug!("Extracted text from response: {} characters", result.len());
+        debug!("Extracted text from response: {}", result.len());
         Ok(result)
     } else {
         warn!("No candidates in response");
@@ -1143,131 +1168,168 @@ async fn main() -> Result<(), AppError> {
 
     match &cli.command {
         Commands::Chat { query } => {
-            info!("User Query: '{}'", query);
+            // Initialize with the query from command line if provided
+            let mut initial_query = query.clone();
             
-            let gemini_response = chat_with_gemini(query, &system_info, &api_key, &feedback_string)
-                .await
-                .map_err(|e| AppError::ApiError(format!("Error communicating with Gemini API: {}", e)))?;
+            // Create a continuous chat loop
+            println!("Starting chat with Gemini. Type 'exit' or 'quit' to end the conversation.");
             
-            let candidates = gemini_response.candidates.ok_or_else(|| {
-                if let Some(prompt_feedback) = gemini_response.prompt_feedback {
-                    if let Some(block_reason) = prompt_feedback.block_reason {
-                        error!("Request was blocked: {}", block_reason);
-                        AppError::ResponseError(format!("Request was blocked: {}", block_reason))
+            loop {
+                // Get the current query
+                let current_query = match initial_query.take() {
+                    Some(q) => q,
+                    None => {
+                        print!("\nEnter your query: ");
+                        std::io::stdout().flush().map_err(|e| AppError::IoError(e))?;
+                        let mut input = String::new();
+                        std::io::stdin().read_line(&mut input).map_err(|e| AppError::IoError(e))?;
+                        let input = input.trim().to_string();
+                        
+                        // Check for exit commands
+                        if input.eq_ignore_ascii_case("exit") || input.eq_ignore_ascii_case("quit") {
+                            println!("Ending chat session.");
+                            break;
+                        }
+                        
+                        // Skip empty inputs
+                        if input.is_empty() {
+                            continue;
+                        }
+                        
+                        input
+                    }
+                };
+                
+                info!("User Query: '{}'", current_query);
+                
+                let gemini_response = chat_with_gemini(&current_query, &system_info, &api_key, &feedback_string)
+                    .await
+                    .map_err(|e| AppError::ApiError(format!("Error communicating with Gemini API: {}", e)))?;
+                
+                let candidates = gemini_response.candidates.ok_or_else(|| {
+                    if let Some(prompt_feedback) = gemini_response.prompt_feedback {
+                        if let Some(block_reason) = prompt_feedback.block_reason {
+                            error!("Request was blocked: {}", block_reason);
+                            AppError::ResponseError(format!("Request was blocked: {}", block_reason))
+                        } else {
+                            error!("No candidates received from Gemini API");
+                            AppError::ResponseError("No candidates received from Gemini API".to_string())
+                        }
                     } else {
                         error!("No candidates received from Gemini API");
                         AppError::ResponseError("No candidates received from Gemini API".to_string())
                     }
-                } else {
-                    error!("No candidates received from Gemini API");
-                    AppError::ResponseError("No candidates received from Gemini API".to_string())
-                }
-            })?;
-            
-            let candidate = candidates.get(0).ok_or_else(|| {
-                error!("No candidates in response");
-                AppError::ResponseError("No candidates in response".to_string())
-            })?;
-            
-            // Find the text part in the response
-            let mut text_content = String::new();
-            for part in &candidate.content.parts {
-                if let Part::Text { text } = part {
-                    text_content.push_str(&text);
-                    break;
-                }
-            }
-
-            if text_content.is_empty() {
-                error!("No text content in response");
-                return Err(AppError::ResponseError("No text content in response".to_string()));
-            }
-            
-            debug!("Received text content: {}", text_content);
-            
-            let gemini_response = serde_json::from_str::<GeminiResponse>(&text_content)
-                .map_err(|e| {
-                    error!("Failed to parse JSON: {}\nRaw: {}", e, text_content);
-                    AppError::JsonParseError(e)
                 })?;
-            
-            feedback_messages.clear();
-            for cmd in gemini_response.commands {
-                let feedback = match cmd {
-                    GeminiCommand::CreateFolder { path } => {
-                        info!("Creating folder: {}", path);
-                        let result = fs::create_dir_all(&path);
-                        CommandFeedback {
-                            command_type: "create_folder".to_string(),
-                            command_details: format!("path: {}", path),
-                            status: if result.is_ok() {
-                                CommandStatus::Success
-                            } else {
-                                error!("Failed to create folder: {}", path);
-                                CommandStatus::Failure
-                            },
-                            message: result
-                                .map(|_| "Folder created".to_string())
-                                .unwrap_or_else(|e| e.to_string()),
-                        }
-                    }
-                    GeminiCommand::CreateFile { path, content } => {
-                        info!("Creating file: {}", path);
-                        let result = fs::write(&path, &content);
-                        CommandFeedback {
-                            command_type: "create_file".to_string(),
-                            command_details: format!("path: {}", path),
-                            status: if result.is_ok() {
-                                CommandStatus::Success
-                            } else {
-                                error!("Failed to create file: {}", path);
-                                CommandStatus::Failure
-                            },
-                            message: result
-                                .map(|_| "File created".to_string())
-                                .unwrap_or_else(|e| e.to_string()),
-                        }
-                    }
-                    GeminiCommand::ExecuteCommand { command, args } => {
-                        info!("Executing: {}", command);
-                        let result = execute_command(&format!(
-                            "{} {}",
-                            command,
-                            args.join(" ")
-                        ))
-                        .await;
-                        CommandFeedback {
-                            command_type: "execute_command".to_string(),
-                            command_details: format!(
-                                "command: {}",
-                                command
-                            ),
-                            status: if result.is_ok() {
-                                CommandStatus::Success
-                            } else {
-                                error!("Failed to execute command: {}", command);
-                                CommandStatus::Failure
-                            },
-                            message: result.unwrap_or_else(|e| e.to_string()),
-                        }
-                    }
-                };
-                feedback_messages.push(feedback);
-            }
-            if !feedback_messages.is_empty() {
-                match format_feedback(feedback_messages.clone()) {
-                    Ok(formatted_feedback) => {
-                        feedback_string = formatted_feedback;
-                        debug!("Updated feedback for next interaction: {}", feedback_string);
-                    },
-                    Err(e) => {
-                        warn!("Failed to format feedback: {}", e);
-                        // Keep the previous feedback string if formatting fails
+                
+                let candidate = candidates.get(0).ok_or_else(|| {
+                    error!("No candidates in response");
+                    AppError::ResponseError("No candidates in response".to_string())
+                })?;
+                
+                // Find the text part in the response
+                let mut text_content = String::new();
+                for part in &candidate.content.parts {
+                    if let Part::Text { text } = part {
+                        text_content.push_str(&text);
+                        break;
                     }
                 }
+
+                if text_content.is_empty() {
+                    error!("No text content in response");
+                    return Err(AppError::ResponseError("No text content in response".to_string()));
+                }
+                
+                debug!("Received text content: {}", text_content);
+                
+                // Extract JSON from potential markdown code blocks
+                let json_content = extract_json_from_markdown(&text_content);
+                debug!("Extracted JSON content: {}", json_content);
+                
+                let gemini_response = serde_json::from_str::<GeminiResponse>(&json_content)
+                    .map_err(|e| {
+                        error!("Failed to parse JSON: {}\nRaw: {}", e, text_content);
+                        AppError::JsonParseError(e)
+                    })?;
+                
+                feedback_messages.clear();
+                for cmd in gemini_response.commands {
+                    let feedback = match cmd {
+                        GeminiCommand::CreateFolder { path } => {
+                            info!("Creating folder: {}", path);
+                            let result = fs::create_dir_all(&path);
+                            CommandFeedback {
+                                command_type: "create_folder".to_string(),
+                                command_details: format!("path: {}", path),
+                                status: if result.is_ok() {
+                                    CommandStatus::Success
+                                } else {
+                                    error!("Failed to create folder: {}", path);
+                                    CommandStatus::Failure
+                                },
+                                message: result
+                                    .map(|_| "Folder created".to_string())
+                                    .unwrap_or_else(|e| e.to_string()),
+                            }
+                        }
+                        GeminiCommand::CreateFile { path, content } => {
+                            info!("Creating file: {}", path);
+                            let result = fs::write(&path, &content);
+                            CommandFeedback {
+                                command_type: "create_file".to_string(),
+                                command_details: format!("path: {}", path),
+                                status: if result.is_ok() {
+                                    CommandStatus::Success
+                                } else {
+                                    error!("Failed to create file: {}", path);
+                                    CommandStatus::Failure
+                                },
+                                message: result
+                                    .map(|_| "File created".to_string())
+                                    .unwrap_or_else(|e| e.to_string()),
+                            }
+                        }
+                        GeminiCommand::ExecuteCommand { command, args } => {
+                            info!("Executing: {}", command);
+                            let result = execute_command(&format!(
+                                "{} {}",
+                                command,
+                                args.join(" ")
+                            ))
+                            .await;
+                            CommandFeedback {
+                                command_type: "execute_command".to_string(),
+                                command_details: format!(
+                                    "command: {}",
+                                    command
+                                ),
+                                status: if result.is_ok() {
+                                    CommandStatus::Success
+                                } else {
+                                    error!("Failed to execute command: {}", command);
+                                    CommandStatus::Failure
+                                },
+                                message: result.unwrap_or_else(|e| e.to_string()),
+                            }
+                        }
+                    };
+                    feedback_messages.push(feedback);
+                }
+                if !feedback_messages.is_empty() {
+                    match format_feedback(feedback_messages.clone()) {
+                        Ok(formatted_feedback) => {
+                            feedback_string = formatted_feedback;
+                            debug!("Updated feedback for next interaction: {}", feedback_string);
+                        },
+                        Err(e) => {
+                            warn!("Failed to format feedback: {}", e);
+                            // Keep the previous feedback string if formatting fails
+                        }
+                    }
+                }
+                info!("User message: {}", gemini_response.user_message);
+                println!("\n{}", gemini_response.user_message);
             }
-            info!("User message: {}", gemini_response.user_message);
-            println!("\n{}", gemini_response.user_message);
         }
         Commands::Execute { query } => {
             info!("User Query for Code Execution: '{}'", query);

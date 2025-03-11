@@ -4,12 +4,13 @@ A Rust CLI application that interfaces with Google's Gemini API to generate and 
 
 ## Features
 
-- **Chat with Gemini**: Interact with the Gemini 2.0 Flash Thinking model to get responses to your queries
+- **Interactive Chat with Gemini**: Continuous chat experience with the Gemini 2.0 Flash Thinking model
 - **Execute Code**: Use the Gemini 1.5 Flash model to execute code snippets
 - **Create Codebases**: Generate complete codebases from natural language descriptions
 - **Command feedback loop for iterative improvements**
 - **Support for file and folder creation, code writing, and command execution**
 - **Direct code execution using Gemini 1.5 Flash model**
+- **Configurable API endpoint and model selection**
 - **Robust error handling** with custom error types and proper error propagation
 - **Configurable logging** for better debugging and verbosity control
 
@@ -38,11 +39,20 @@ A Rust CLI application that interfaces with Google's Gemini API to generate and 
 
 ### Chat Mode
 
-To chat with the Gemini 2.0 Flash Thinking model:
+To start an interactive chat session with the Gemini model:
 
 ```bash
+# Start chat with an initial query
 cargo run -- chat --query "What is Rust programming language?"
+
+# Start chat without an initial query (will prompt for input)
+cargo run -- chat
 ```
+
+In the interactive chat mode:
+- Type your queries and receive responses
+- The chat maintains context across multiple interactions
+- Type `exit` or `quit` to end the chat session
 
 ### Execute Mode
 
@@ -79,18 +89,31 @@ RUST_LOG=trace cargo run -- create-codebase --description "Simple web app" --out
 
 Common log levels from least to most verbose: error, warn, info, debug, trace
 
+## Configuration
+
+The application requires a valid Gemini API key to function. You can obtain one from the [Google AI Studio](https://ai.google.dev/).
+
+### Environment Variables
+
+- `GEMINI_API_KEY`: Required for authenticating API requests
+- `GEMINI_MODEL`: Optional variable to specify which model to use (defaults to gemini-2.0-flash-thinking-exp-01-21)
+- `GEMINI_API_ENDPOINT`: Optional variable to specify a custom API endpoint
+
 ## Supported Commands
 
 The application supports three main modes:
 
 ### Chat Mode
 
-In chat mode, the Gemini 2.0 Flash Thinking model will respond with structured commands that this CLI can execute:
-
-1. `create_folder`: Create a new directory
-2. `create_file`: Create an empty file
-3. `write_code_to_file`: Write code to a specified file
-4. `execute_command`: Execute a shell command
+In the interactive chat mode:
+1. The Gemini model responds with structured commands that this CLI can execute
+2. Feedback from command execution is sent back to Gemini in subsequent queries
+3. The chat maintains context across multiple interactions
+4. Commands that can be executed:
+   - `create_folder`: Create a new directory
+   - `create_file`: Create an empty file
+   - `write_code_to_file`: Write code to a specified file
+   - `execute_command`: Execute a shell command
 
 ### Execute Mode
 
@@ -106,11 +129,7 @@ In create codebase mode, the application generates a complete codebase based on 
 
 ## Feedback Loop
 
-After executing commands in chat mode, the application sends feedback to Gemini in subsequent queries, allowing it to adjust its approach based on command success or failure.
-
-## Configuration
-
-The application requires a valid Gemini API key to function. You can obtain one from the [Google AI Studio](https://ai.google.dev/).
+After executing commands in chat mode, the application sends feedback to Gemini in subsequent queries, allowing it to adjust its approach based on command success or failure. This feedback loop is maintained throughout the chat session.
 
 ## Dependencies
 
