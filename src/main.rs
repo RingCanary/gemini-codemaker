@@ -6,27 +6,37 @@ use serde_json::json;
 use std::{env, fs, path::Path, process::Command as ProcessCommand};
 use thiserror::Error;
 
-// Custom error type for the application
+/// Custom error type for the application
+/// 
+/// Represents all possible errors that can occur in the application.
+/// Uses thiserror for deriving error implementations.
 #[derive(Error, Debug)]
 pub enum AppError {
+    /// Error when interacting with the Gemini API
     #[error("API error: {0}")]
     ApiError(String),
     
+    /// Error when parsing JSON data
     #[error("JSON parsing error: {0}")]
     JsonParseError(#[from] serde_json::Error),
     
+    /// Error when performing file I/O operations
     #[error("IO error: {0}")]
     IoError(#[from] std::io::Error),
     
+    /// Error when making HTTP requests
     #[error("HTTP error: {0}")]
     HttpError(#[from] reqwest::Error),
     
+    /// Error related to environment variables
     #[error("Environment error: {0}")]
     EnvError(String),
     
+    /// Error when executing shell commands
     #[error("Command execution error: {0}")]
     CommandError(String),
     
+    /// Error in the response from Gemini API
     #[error("Response error: {0}")]
     ResponseError(String),
 }
@@ -37,6 +47,9 @@ impl From<String> for AppError {
     }
 }
 
+/// Command line interface arguments structure
+/// 
+/// Defines the CLI arguments and subcommands for the application.
 #[derive(Parser, Debug)]
 #[command(version = "1.0", about = "Interactive CLI with Gemini")]
 struct Cli {
@@ -44,46 +57,50 @@ struct Cli {
     command: Commands,
 }
 
+/// Subcommands for the CLI application
+/// 
+/// Defines the different modes of operation for the application:
+/// - Chat: Interactive chat with Gemini
+/// - Execute: Execute code with Gemini
+/// - CreateCodebase: Generate a complete codebase from a description
 #[derive(Debug, clap::Subcommand)]
 enum Commands {
+    /// Chat with Gemini and execute commands
     Chat {
+        /// The query to send to Gemini
         #[arg(long)]
         query: String,
     },
+    /// Execute code with Gemini
     Execute {
+        /// The query to send to Gemini
         #[arg(long)]
         query: String,
     },
+    /// Create a codebase from a description
     CreateCodebase {
+        /// Description of the codebase to create
         #[arg(long)]
         description: String,
+        /// Output directory for the generated codebase
         #[arg(long, default_value = ".")]
         output_dir: String,
     },
 }
 
-// Response structures for Gemini API
+/// Response structure from the Gemini API
+/// 
+/// Contains the response data from the Gemini API, including
+/// candidates, prompt feedback, and usage metadata.
 #[derive(Debug, Deserialize)]
 struct GeminiApiResponse {
     candidates: Option<Vec<Candidate>>,
     prompt_feedback: Option<PromptFeedback>,
 }
 
-#[derive(Debug, Deserialize)]
-struct PromptFeedback {
-    block_reason: Option<String>,
-    #[allow(dead_code)]
-    safety_ratings: Option<Vec<SafetyRating>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct SafetyRating {
-    #[allow(dead_code)]
-    category: String,
-    #[allow(dead_code)]
-    probability: String,
-}
-
+/// Candidate in the Gemini API response
+/// 
+/// Represents a single response candidate from the Gemini API.
 #[derive(Debug, Deserialize)]
 struct Candidate {
     content: Content,
@@ -95,6 +112,9 @@ struct Candidate {
     safety_ratings: Option<Vec<SafetyRating>>,
 }
 
+/// Content of a candidate in the Gemini API response
+/// 
+/// Contains the parts of the response content.
 #[derive(Debug, Deserialize)]
 struct Content {
     #[allow(dead_code)]
@@ -102,6 +122,12 @@ struct Content {
     parts: Vec<Part>,
 }
 
+/// Part of the content in a Gemini API response
+/// 
+/// Can be one of several types:
+/// - Text: Plain text response
+/// - ExecutableCode: Code that can be executed
+/// - CodeExecutionResult: Result of code execution
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum Part {
@@ -116,25 +142,60 @@ enum Part {
     },
 }
 
+/// Executable code part in a Gemini API response
+/// 
+/// Contains code that can be executed and its language.
 #[derive(Debug, Deserialize)]
 struct ExecutableCode {
     language: String,
     code: String,
 }
 
+/// Code execution result in a Gemini API response
+/// 
+/// Contains the result of executing code.
 #[derive(Debug, Deserialize)]
 struct CodeExecutionResult {
     outcome: String,
     output: String,
 }
 
-// Structure for command processing
+/// Prompt feedback in a Gemini API response
+/// 
+/// Contains feedback about the prompt, such as whether it was blocked.
+#[derive(Debug, Deserialize)]
+struct PromptFeedback {
+    block_reason: Option<String>,
+    #[allow(dead_code)]
+    safety_ratings: Option<Vec<SafetyRating>>,
+}
+
+/// Safety rating in a Gemini API response
+/// 
+/// Contains safety information about the response.
+#[derive(Debug, Deserialize)]
+struct SafetyRating {
+    #[allow(dead_code)]
+    category: String,
+    #[allow(dead_code)]
+    probability: String,
+}
+
+/// Response structure for the Gemini chat mode
+/// 
+/// Contains the user message and commands to execute.
 #[derive(Debug, Deserialize)]
 struct GeminiResponse {
     commands: Vec<GeminiCommand>,
     user_message: String,
 }
 
+/// Command from Gemini to execute
+/// 
+/// Can be one of several types:
+/// - CreateFolder: Create a directory
+/// - CreateFile: Create a file with content
+/// - ExecuteCommand: Execute a shell command
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum GeminiCommand {
@@ -143,12 +204,18 @@ enum GeminiCommand {
     ExecuteCommand { command: String, args: Vec<String> },
 }
 
+/// Status of a command execution
+/// 
+/// Indicates whether a command succeeded or failed.
 #[derive(Serialize, Deserialize, Debug)]
 enum CommandStatus {
     Success,
     Failure,
 }
 
+/// Feedback about a command execution
+/// 
+/// Contains details about the execution of a command.
 #[derive(Serialize, Deserialize, Debug)]
 struct CommandFeedback {
     command_type: String,
@@ -157,6 +224,20 @@ struct CommandFeedback {
     message: String,
 }
 
+/// Communicates with the Gemini API in chat mode
+///
+/// Sends a query to the Gemini 2.0 Flash Thinking model and returns the response.
+///
+/// # Arguments
+///
+/// * `query` - The user's query to send to Gemini
+/// * `system_info` - System information to include in the prompt
+/// * `api_key` - The Gemini API key
+/// * `feedback` - Feedback from previous command executions
+///
+/// # Returns
+///
+/// * `Result<GeminiApiResponse, AppError>` - The API response or an error
 async fn chat_with_gemini(
     query: &str,
     system_info: &str,
@@ -211,6 +292,18 @@ async fn chat_with_gemini(
     }
 }
 
+/// Communicates with the Gemini API in execute mode
+///
+/// Sends a query to the Gemini 2.0 Flash Thinking model for code execution.
+///
+/// # Arguments
+///
+/// * `query` - The user's query to send to Gemini
+/// * `api_key` - The Gemini API key
+///
+/// # Returns
+///
+/// * `Result<GeminiApiResponse, AppError>` - The API response or an error
 async fn execute_with_gemini(
     query: &str,
     api_key: &str,
@@ -264,6 +357,19 @@ async fn execute_with_gemini(
     }
 }
 
+/// Creates a codebase using the Gemini API
+///
+/// Sends a description to the Gemini 2.0 Flash Thinking model to generate a complete codebase.
+///
+/// # Arguments
+///
+/// * `description` - Description of the codebase to create
+/// * `output_dir` - Directory where the codebase will be created
+/// * `api_key` - The Gemini API key
+///
+/// # Returns
+///
+/// * `Result<GeminiApiResponse, AppError>` - The API response or an error
 async fn create_codebase_with_gemini(
     description: &str,
     output_dir: &str,
@@ -346,6 +452,16 @@ async fn create_codebase_with_gemini(
 }
 
 /// Infers a file extension based on the content of the code
+///
+/// Analyzes the content of a file to determine the most appropriate file extension.
+///
+/// # Arguments
+///
+/// * `content` - The content of the file
+///
+/// # Returns
+///
+/// * `String` - The inferred file extension
 fn infer_extension_from_content(content: &str) -> String {
     if content.contains("<?php") {
         return "php".to_string();
@@ -375,6 +491,16 @@ fn infer_extension_from_content(content: &str) -> String {
 }
 
 /// Returns a file extension based on the language name
+///
+/// Maps a programming language name to its standard file extension.
+///
+/// # Arguments
+///
+/// * `language` - The name of the programming language
+///
+/// # Returns
+///
+/// * `String` - The file extension for the language
 fn get_extension_from_language(language: &str) -> String {
     match language.to_lowercase().as_str() {
         "python" | "py" => "py",
@@ -404,6 +530,16 @@ fn get_extension_from_language(language: &str) -> String {
 }
 
 /// Extracts files from markdown text using headers and code blocks
+///
+/// Parses markdown text to extract file content and names from code blocks.
+///
+/// # Arguments
+///
+/// * `text` - The markdown text to parse
+///
+/// # Returns
+///
+/// * `Vec<(String, String)>` - A vector of (filename, content) pairs
 fn extract_files_from_markdown(text: &str) -> Vec<(String, String)> {
     let mut files = Vec::new();
     let mut current_file = None;
@@ -465,6 +601,16 @@ fn extract_files_from_markdown(text: &str) -> Vec<(String, String)> {
 }
 
 /// Extracts files from code blocks
+///
+/// Parses text to extract code blocks and generates filenames based on the language.
+///
+/// # Arguments
+///
+/// * `text` - The text to parse
+///
+/// # Returns
+///
+/// * `Vec<(String, String)>` - A vector of (filename, content) pairs
 fn extract_files_from_code_blocks(text: &str) -> Vec<(String, String)> {
     let mut files = Vec::new();
     let re = regex::Regex::new(r"(?m)^```(\w+)?\s*\n([\s\S]*?)^```").unwrap();
@@ -490,6 +636,16 @@ fn extract_files_from_code_blocks(text: &str) -> Vec<(String, String)> {
 }
 
 /// Cleans and validates a file path
+///
+/// Ensures a file path is safe and normalized.
+///
+/// # Arguments
+///
+/// * `file_path` - The file path to clean and validate
+///
+/// # Returns
+///
+/// * `Result<String, AppError>` - The cleaned path or an error if the path is suspicious
 fn clean_and_validate_file_path(file_path: &str) -> Result<String, AppError> {
     let path = file_path.trim();
     
@@ -507,6 +663,17 @@ fn clean_and_validate_file_path(file_path: &str) -> Result<String, AppError> {
 }
 
 /// Writes files to disk and returns a list of created file paths
+///
+/// Creates files on disk based on the provided content.
+///
+/// # Arguments
+///
+/// * `files` - A vector of (filename, content) pairs
+/// * `output_dir` - The directory where files should be created
+///
+/// # Returns
+///
+/// * `Result<Vec<String>, AppError>` - A list of created file paths or an error
 fn write_files_to_disk(
     files: Vec<(String, String)>,
     output_dir: &str,
@@ -547,7 +714,18 @@ fn write_files_to_disk(
     Ok(created_files)
 }
 
-/// Creates files from a text response containing code blocks and file information
+/// Creates files from a Gemini API response
+///
+/// Extracts file information from the API response and creates the files on disk.
+///
+/// # Arguments
+///
+/// * `text` - The text response from Gemini
+/// * `output_dir` - The directory where files should be created
+///
+/// # Returns
+///
+/// * `Result<Vec<String>, AppError>` - A list of created file paths or an error
 fn create_files_from_response(
     text: &str,
     output_dir: &str,
@@ -573,6 +751,17 @@ fn create_files_from_response(
     )
 }
 
+/// Executes a shell command
+///
+/// Runs a command in the shell and returns the output.
+///
+/// # Arguments
+///
+/// * `command` - The command to execute
+///
+/// # Returns
+///
+/// * `Result<String, AppError>` - The command output or an error
 async fn execute_command(command: &str) -> Result<String, AppError> {
     let parts: Vec<&str> = command.split_whitespace().collect();
     if parts.is_empty() {
@@ -604,6 +793,306 @@ async fn execute_command(command: &str) -> Result<String, AppError> {
     }
 }
 
+/// Gets system information for the prompt
+///
+/// Collects information about the operating system and environment.
+///
+/// # Returns
+///
+/// * `String` - A string containing system information
+fn get_system_info() -> String {
+    format!(
+        "OS: {}\nArch: {}\nDir: {:?}",
+        env::consts::OS,
+        env::consts::ARCH,
+        env::current_dir().unwrap_or_default()
+    )
+}
+
+#[allow(dead_code)]
+/// Processes a command from the Gemini API
+///
+/// Executes a command received from the Gemini API and returns feedback about the execution.
+///
+/// # Arguments
+///
+/// * `command` - The command to execute
+/// * `output_dir` - The directory where files should be created
+///
+/// # Returns
+///
+/// * `Result<CommandFeedback, AppError>` - Feedback about the command execution or an error
+async fn process_command(
+    command: &GeminiCommand,
+    output_dir: &str,
+) -> Result<CommandFeedback, AppError> {
+    match command {
+        GeminiCommand::CreateFolder { path } => {
+            let clean_path = clean_and_validate_file_path(path)?;
+            let full_path = Path::new(output_dir).join(&clean_path);
+            
+            debug!("Creating folder: {}", full_path.display());
+            
+            if let Err(e) = fs::create_dir_all(&full_path) {
+                error!("Failed to create folder {}: {}", full_path.display(), e);
+                return Ok(CommandFeedback {
+                    command_type: "create_folder".to_string(),
+                    command_details: format!("path: {}", path),
+                    status: CommandStatus::Failure,
+                    message: format!("Failed to create folder: {}", e),
+                });
+            }
+            
+            info!("Created folder: {}", full_path.display());
+            
+            Ok(CommandFeedback {
+                command_type: "create_folder".to_string(),
+                command_details: format!("path: {}", path),
+                status: CommandStatus::Success,
+                message: format!("Created folder: {}", full_path.display()),
+            })
+        }
+        GeminiCommand::CreateFile { path, content } => {
+            let clean_path = clean_and_validate_file_path(path)?;
+            let full_path = Path::new(output_dir).join(&clean_path);
+            
+            debug!("Creating file: {}", full_path.display());
+            
+            // Create parent directories if they don't exist
+            if let Some(parent) = full_path.parent() {
+                if !parent.exists() {
+                    debug!("Creating parent directory: {}", parent.display());
+                    if let Err(e) = fs::create_dir_all(parent) {
+                        error!("Failed to create parent directory {}: {}", parent.display(), e);
+                        return Ok(CommandFeedback {
+                            command_type: "create_file".to_string(),
+                            command_details: format!("path: {}", path),
+                            status: CommandStatus::Failure,
+                            message: format!("Failed to create parent directory: {}", e),
+                        });
+                    }
+                }
+            }
+            
+            if let Err(e) = fs::write(&full_path, content) {
+                error!("Failed to write file {}: {}", full_path.display(), e);
+                return Ok(CommandFeedback {
+                    command_type: "create_file".to_string(),
+                    command_details: format!("path: {}", path),
+                    status: CommandStatus::Failure,
+                    message: format!("Failed to write file: {}", e),
+                });
+            }
+            
+            info!("Created file: {}", full_path.display());
+            
+            Ok(CommandFeedback {
+                command_type: "create_file".to_string(),
+                command_details: format!("path: {}", path),
+                status: CommandStatus::Success,
+                message: format!("Created file: {}", full_path.display()),
+            })
+        }
+        GeminiCommand::ExecuteCommand { command, args } => {
+            let cmd_str = format!("{} {}", command, args.join(" "));
+            debug!("Executing command: {}", cmd_str);
+            
+            match execute_command(&cmd_str).await {
+                Ok(output) => {
+                    info!("Command executed successfully: {}", cmd_str);
+                    Ok(CommandFeedback {
+                        command_type: "execute_command".to_string(),
+                        command_details: cmd_str,
+                        status: CommandStatus::Success,
+                        message: format!("Command executed successfully. Output: {}", output),
+                    })
+                }
+                Err(e) => {
+                    error!("Command execution failed: {}", e);
+                    Ok(CommandFeedback {
+                        command_type: "execute_command".to_string(),
+                        command_details: cmd_str,
+                        status: CommandStatus::Failure,
+                        message: format!("Command execution failed: {}", e),
+                    })
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+/// Processes the response from the Gemini API
+///
+/// Extracts and executes commands from the Gemini API response.
+///
+/// # Arguments
+///
+/// * `response_text` - The text response from Gemini
+/// * `output_dir` - The directory where files should be created
+///
+/// # Returns
+///
+/// * `Result<Vec<CommandFeedback>, AppError>` - Feedback about the command executions or an error
+async fn process_response(
+    response_text: &str,
+    output_dir: &str,
+) -> Result<Vec<CommandFeedback>, AppError> {
+    // Try to parse the response as JSON
+    let response_result: Result<GeminiResponse, serde_json::Error> = serde_json::from_str(response_text);
+    
+    match response_result {
+        Ok(response) => {
+            info!("Successfully parsed JSON response with {} commands", response.commands.len());
+            let mut feedback = Vec::new();
+            
+            for command in response.commands {
+                match process_command(&command, output_dir).await {
+                    Ok(cmd_feedback) => {
+                        feedback.push(cmd_feedback);
+                    }
+                    Err(e) => {
+                        error!("Error processing command: {}", e);
+                        return Err(e);
+                    }
+                }
+            }
+            
+            Ok(feedback)
+        }
+        Err(e) => {
+            warn!("Failed to parse response as JSON: {}", e);
+            debug!("Attempting to extract files from markdown response");
+            
+            // If JSON parsing fails, try to extract files from markdown
+            match create_files_from_response(response_text, output_dir) {
+                Ok(files) => {
+                    info!("Created {} files from markdown response", files.len());
+                    let mut feedback = Vec::new();
+                    
+                    for file in files {
+                        feedback.push(CommandFeedback {
+                            command_type: "create_file".to_string(),
+                            command_details: format!("path: {}", file),
+                            status: CommandStatus::Success,
+                            message: format!("Created file: {}", file),
+                        });
+                    }
+                    
+                    Ok(feedback)
+                }
+                Err(e) => {
+                    error!("Failed to create files from response: {}", e);
+                    Err(e)
+                }
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
+/// Formats command feedback as a JSON string
+///
+/// Converts a vector of CommandFeedback into a JSON string for sending back to Gemini.
+///
+/// # Arguments
+///
+/// * `feedback` - A vector of CommandFeedback objects
+///
+/// # Returns
+///
+/// * `Result<String, AppError>` - A JSON string containing the feedback or an error
+fn format_feedback(feedback: Vec<CommandFeedback>) -> Result<String, AppError> {
+    match serde_json::to_string(&feedback) {
+        Ok(json) => {
+            debug!("Formatted feedback as JSON: {}", json);
+            Ok(json)
+        }
+        Err(e) => {
+            error!("Failed to format feedback as JSON: {}", e);
+            Err(AppError::JsonParseError(e))
+        }
+    }
+}
+
+#[allow(dead_code)]
+/// Extracts text from a Gemini API response
+///
+/// Gets the text content from the API response.
+///
+/// # Arguments
+///
+/// * `response` - The Gemini API response
+///
+/// # Returns
+///
+/// * `Result<String, AppError>` - The extracted text or an error
+fn extract_text_from_response(response: GeminiApiResponse) -> Result<String, AppError> {
+    // Check if the response was blocked
+    if let Some(feedback) = response.prompt_feedback {
+        if let Some(reason) = feedback.block_reason {
+            error!("Response was blocked: {}", reason);
+            return Err(AppError::ResponseError(format!("Response was blocked: {}", reason)));
+        }
+    }
+    
+    // Extract the text from the response
+    if let Some(candidates) = response.candidates {
+        if candidates.is_empty() {
+            warn!("No candidates in response");
+            return Err(AppError::ResponseError("No candidates in response".to_string()));
+        }
+        
+        let candidate = &candidates[0];
+        
+        // Check if the response was cut off
+        if let Some(reason) = &candidate.finish_reason {
+            if reason != "STOP" {
+                warn!("Response was cut off: {}", reason);
+            }
+        }
+        
+        // Extract the text from the parts
+        let mut result = String::new();
+        
+        for part in &candidate.content.parts {
+            match part {
+                Part::Text { text } => {
+                    result.push_str(&text);
+                }
+                Part::ExecutableCode { executable_code } => {
+                    debug!("Found executable code in response: {}", executable_code.language);
+                    result.push_str(&format!("```{}\n{}\n```\n", executable_code.language, executable_code.code));
+                }
+                Part::CodeExecutionResult { code_execution_result } => {
+                    debug!("Found code execution result in response: {}", code_execution_result.outcome);
+                    result.push_str(&format!("Execution result: {}\nOutput: {}\n", 
+                                           code_execution_result.outcome, 
+                                           code_execution_result.output));
+                }
+            }
+        }
+        
+        if result.is_empty() {
+            warn!("Empty response from Gemini");
+            return Err(AppError::ResponseError("Empty response from Gemini".to_string()));
+        }
+        
+        debug!("Extracted text from response: {} characters", result.len());
+        Ok(result)
+    } else {
+        warn!("No candidates in response");
+        Err(AppError::ResponseError("No candidates in response".to_string()))
+    }
+}
+
+/// Main function
+///
+/// Parses command-line arguments and executes the appropriate subcommand.
+///
+/// # Returns
+///
+/// * `Result<(), AppError>` - Ok if the program executed successfully, or an error
 #[tokio::main]
 async fn main() -> Result<(), AppError> {
     // Initialize the logger
@@ -859,13 +1348,4 @@ async fn main() -> Result<(), AppError> {
         }
     }
     Ok(())
-}
-
-fn get_system_info() -> String {
-    format!(
-        "OS: {}\nArch: {}\nDir: {:?}",
-        env::consts::OS,
-        env::consts::ARCH,
-        env::current_dir().unwrap_or_default()
-    )
 }
